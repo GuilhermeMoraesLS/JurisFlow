@@ -232,7 +232,12 @@ def formatar_relatorio_previdenciario(
         linhas.append("")
         
         linhas.append(f"Indice Aplicado: {resultado_calculo['indice_aplicado']}")
-        linhas.append(f"Taxa de Correcao Acumulada: {resultado_calculo['taxa_acumulada']:.4f}%")
+        
+        # Calcula taxa acumulada percentual: (total_corrigido / total_sem_correcao - 1) * 100
+        if resultado_calculo['total_devido_sem_correcao'] > 0:
+            taxa_acumulada_percentual = ((resultado_calculo['total_corrigido'] / resultado_calculo['total_devido_sem_correcao']) - 1) * 100
+            linhas.append(f"Taxa de Correcao Acumulada: {taxa_acumulada_percentual:.4f}%")
+        
         linhas.append("")
         
         valor_corrigido = f"R$ {resultado_calculo['total_corrigido']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
@@ -245,7 +250,7 @@ def formatar_relatorio_previdenciario(
         linhas.append("")
         
         # Memória de Cálculo Mensal (Amostra dos primeiros e últimos 3 meses)
-        memoria = resultado_calculo['memoria_mensal']
+        memoria = resultado_calculo.get('memoria_mensal', [])
         
         if len(memoria) > 6:
             linhas.append("-" * 80)
@@ -255,25 +260,46 @@ def formatar_relatorio_previdenciario(
             linhas.append("Primeiros 3 Meses:")
             for mes_info in memoria[:3]:
                 competencia = mes_info['competencia']
-                valor = f"R$ {mes_info['valor_corrigido']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
-                taxa = mes_info['taxa_periodo']
-                linhas.append(f"  {competencia}: {valor} (taxa acum.: {taxa:.4f}%)")
+                tipo = mes_info.get('tipo', 'RMI Mensal')
+                valor_original = f"R$ {mes_info['valor_original']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+                valor_corrigido = f"R$ {mes_info['valor_corrigido']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+                fator = mes_info.get('fator_correcao', 1.0)
+                linhas.append(f"  {competencia} ({tipo}):")
+                linhas.append(f"    Original: {valor_original} x Fator: {fator:.6f} = Corrigido: {valor_corrigido}")
             
             linhas.append("")
-            linhas.append(f"[... {len(memoria) - 6} meses intermediarios ...]")
+            linhas.append(f"[... {len(memoria) - 6} competencias intermediarias ...]")
             linhas.append("")
             
             linhas.append("Ultimos 3 Meses:")
             for mes_info in memoria[-3:]:
                 competencia = mes_info['competencia']
-                valor = f"R$ {mes_info['valor_corrigido']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
-                taxa = mes_info['taxa_periodo']
-                linhas.append(f"  {competencia}: {valor} (taxa acum.: {taxa:.4f}%)")
+                tipo = mes_info.get('tipo', 'RMI Mensal')
+                valor_original = f"R$ {mes_info['valor_original']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+                valor_corrigido = f"R$ {mes_info['valor_corrigido']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+                fator = mes_info.get('fator_correcao', 1.0)
+                linhas.append(f"  {competencia} ({tipo}):")
+                linhas.append(f"    Original: {valor_original} x Fator: {fator:.6f} = Corrigido: {valor_corrigido}")
             
+            linhas.append("")
+        elif len(memoria) > 0:
+            # Se tiver menos de 6 meses, mostra todos
+            linhas.append("-" * 80)
+            linhas.append("4. MEMORIA DE CALCULO MENSAL (Completa)")
+            linhas.append("-" * 80)
+            linhas.append("")
+            for mes_info in memoria:
+                competencia = mes_info['competencia']
+                tipo = mes_info.get('tipo', 'RMI Mensal')
+                valor_original = f"R$ {mes_info['valor_original']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+                valor_corrigido = f"R$ {mes_info['valor_corrigido']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+                fator = mes_info.get('fator_correcao', 1.0)
+                linhas.append(f"  {competencia} ({tipo}):")
+                linhas.append(f"    Original: {valor_original} x Fator: {fator:.6f} = Corrigido: {valor_corrigido}")
             linhas.append("")
         
         # Observações Técnicas
-        if resultado_calculo['observacoes']:
+        if resultado_calculo.get('observacoes'):
             linhas.append("-" * 80)
             linhas.append("5. OBSERVACOES TECNICAS")
             linhas.append("-" * 80)
@@ -287,7 +313,7 @@ def formatar_relatorio_previdenciario(
         linhas.append("ERRO NO CALCULO")
         linhas.append("-" * 80)
         linhas.append("")
-        linhas.append(f"Motivo: {resultado_calculo['erro']}")
+        linhas.append(f"Motivo: {resultado_calculo.get('erro', 'Erro desconhecido')}")
         linhas.append("")
     
     # Rodapé
@@ -372,6 +398,7 @@ def processar_acao_previdenciaria(
     
     # 2. CÁLCULO DE ATRASADOS (só se tiver RMI e DIB)
     resultado_calculo = {}
+    texto_formatado = None
     
     if dados_extraidos.rmi and dados_extraidos.rmi > 0 and dados_extraidos.dib:
         print("\n" + "=" * 80)
@@ -397,6 +424,19 @@ def processar_acao_previdenciaria(
             print(f"  - Total de meses: {resultado_calculo['total_meses']}")
             print(f"  - Índice aplicado: {resultado_calculo['indice_aplicado']}")
             print(f"  - Total corrigido: R$ {resultado_calculo['total_corrigido']:,.2f}")
+            
+            # 3. FORMATAÇÃO PARA WORD (só se cálculo teve sucesso)
+            print("\n" + "=" * 80)
+            print("RELATÓRIO FORMATADO PARA WORD")
+            print("=" * 80)
+            print("\n")
+            
+            texto_formatado = formatar_relatorio_previdenciario(dados_extraidos, resultado_calculo)
+            print(texto_formatado)
+            
+            print("\n" + "=" * 80)
+            print("FIM DO RELATÓRIO")
+            print("=" * 80)
         else:
             print(f"✗ Erro no cálculo: {resultado_calculo['erro']}")
     
@@ -413,24 +453,10 @@ def processar_acao_previdenciaria(
             "erro": "RMI ou DIB ausentes. Cálculo não realizado."
         }
     
-    # 3. FORMATAÇÃO PARA WORD
-    if resultado_calculo.get("status") == "sucesso":
-        print("\n" + "=" * 80)
-        print("RELATÓRIO FORMATADO PARA WORD")
-        print("=" * 80)
-        print("\n")
-        
-        texto_formatado = formatar_relatorio_previdenciario(dados_extraidos, resultado_calculo)
-        print(texto_formatado)
-        
-        print("\n" + "=" * 80)
-        print("FIM DO RELATÓRIO")
-        print("=" * 80)
-    
     return {
         "dados_extraidos": dados_extraidos.model_dump(),
         "calculo": resultado_calculo,
-        "relatorio_word": texto_formatado if resultado_calculo.get("status") == "sucesso" else None
+        "relatorio_word": texto_formatado
     }
 
 
