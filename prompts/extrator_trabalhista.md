@@ -9,6 +9,7 @@ Você DEVE retornar APENAS este formato JSON, sem adicionar ou remover campos:
 
 ```json
 {
+  "nome_reclamante": "Nome Completo do Reclamante",
   "data_admissao": "YYYY-MM-DD ou null",
   "data_dispensa": "YYYY-MM-DD ou null",
   "salario_base": 0.0,

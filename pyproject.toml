@@ -10,4 +10,5 @@ dependencies = [
     "pypdf>=6.7.0",
     "python-dotenv>=1.0.0",
     "python-dateutil>=2.8.2",
+    "python-bcb>=0.3.3",
 ]

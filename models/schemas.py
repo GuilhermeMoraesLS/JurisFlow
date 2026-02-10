@@ -36,6 +36,10 @@ class DadosTrabalhistasExtraidos(BaseModel):
     e validadas sobre o vínculo empregatício e verbas rescisórias.
     """
 
+    nome_reclamante: Optional[str] = Field(
+        default=None,
+        description="Nome completo do reclamante (trabalhador que move a ação)"
+    )
     data_admissao: Optional[date] = Field(
         default=None,
         description="Data exata em que o vínculo empregatício iniciou"
