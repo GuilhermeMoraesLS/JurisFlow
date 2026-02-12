@@ -8,6 +8,7 @@ ATENÇÃO JURÍDICA:
 - Juros de mora: Cada parcela antiga acumula TODOS os índices desde seu vencimento até hoje.
 - 13º salário: Calculado em novembro/dezembro de cada ano (proporcional aos meses do ano).
 - SELIC: Código correto é 4390 (Taxa Selic acumulada no mês %).
+- Salário Mínimo Dinâmico: Quando ativado, aplica os reajustes oficiais mês a mês.
 """
 
 from datetime import date
@@ -15,6 +16,8 @@ from typing import Dict, Any, List
 from dateutil.relativedelta import relativedelta
 from bcb import sgs
 import warnings
+
+from core.lookup_data import obter_salario_minimo
 
 
 class GerenteFinanceiroBCB:
@@ -265,7 +268,8 @@ class GerenteFinanceiroBCB:
         data_inicio: date,
         data_fim: date,
         indice: str = "SELIC",
-        tem_adicional_25: bool = False
+        tem_adicional_25: bool = False,
+        usar_salario_minimo_dinamico: bool = False
     ) -> Dict[str, Any]:
         """
         Calcula o valor total de atrasados previdenciários com correção monetária CORRETA.
@@ -275,18 +279,23 @@ class GerenteFinanceiroBCB:
         2. 13º Salário: Em novembro/dezembro de cada ano, adiciona parcela proporcional.
         3. Juros Compostos Invertidos: Parcela antiga (ex: Ago/2023) multiplica TODAS
            as taxas desde Ago/2023 até data_fim. Parcela nova multiplica menos taxas.
+        4. Salário Mínimo Dinâmico (NOVO): Quando ativado, aplica os reajustes oficiais
+           do salário mínimo mês a mês, respeitando a legislação vigente.
         
         Args:
-            rmi: Renda Mensal Inicial do benefício (valor mensal).
+            rmi: Renda Mensal Inicial do benefício (valor mensal base).
+                 Se usar_salario_minimo_dinamico=True, este valor é IGNORADO.
             data_inicio: DIB - Data de Início do Benefício.
             data_fim: Data final do cálculo (geralmente data da sentença ou data atual).
             indice: Índice de correção: "SELIC", "INPC" ou "IPCA-E".
             tem_adicional_25: Se aplica adicional de 25% (grande invalidez).
+            usar_salario_minimo_dinamico: Se True, usa o salário mínimo vigente em cada mês
+                                          (útil para benefícios de 1 salário mínimo).
         
         Returns:
             Dicionário contendo:
             - status: "sucesso" ou "erro"
-            - rmi_base: RMI original
+            - rmi_base: RMI original (ou "SALARIO_MINIMO_DINAMICO" se usar_salario_minimo_dinamico=True)
             - rmi_com_adicional: RMI + 25% (se aplicável)
             - total_meses: Quantidade de meses de atraso
             - total_devido_sem_correcao: Soma simples (RMI × meses + 13º)
@@ -294,22 +303,31 @@ class GerenteFinanceiroBCB:
             - total_corrigido: Valor final com correção
             - memoria_mensal: Lista de competências com valores detalhados
             - observacoes: Notas sobre o cálculo
+            - usar_salario_minimo_dinamico: Flag indicando se foi usado salário mínimo dinâmico
         
         Exemplo:
             >>> gerente = GerenteFinanceiroBCB()
+            >>> # Benefício fixo
             >>> resultado = gerente.calcular_atrasados(
             ...     rmi=1500.0,
             ...     data_inicio=date(2023, 1, 1),
             ...     data_fim=date(2024, 1, 1),
             ...     indice="SELIC"
             ... )
-            >>> print(f"Total corrigido: R$ {resultado['total_corrigido']:.2f}")
+            >>> # Benefício de 1 salário mínimo (acompanha reajustes)
+            >>> resultado_sm = gerente.calcular_atrasados(
+            ...     rmi=0.0,  # Valor ignorado
+            ...     data_inicio=date(2023, 1, 1),
+            ...     data_fim=date(2024, 1, 1),
+            ...     indice="SELIC",
+            ...     usar_salario_minimo_dinamico=True
+            ... )
         """
         # Validações
-        if rmi <= 0:
+        if not usar_salario_minimo_dinamico and rmi <= 0:
             return {
                 "status": "erro",
-                "erro": "RMI deve ser maior que zero.",
+                "erro": "RMI deve ser maior que zero (ou ative usar_salario_minimo_dinamico).",
                 "total_corrigido": 0.0
             }
         
@@ -319,9 +337,6 @@ class GerenteFinanceiroBCB:
                 "erro": "Data de início deve ser anterior à data final.",
                 "total_corrigido": 0.0
             }
-        
-        # Aplica adicional de 25% se for grande invalidez
-        rmi_efetivo = rmi * 1.25 if tem_adicional_25 else rmi
         
         # Busca taxas mensais de acordo com o índice escolhido
         # (Por enquanto, só SELIC está implementado corretamente)
@@ -350,10 +365,30 @@ class GerenteFinanceiroBCB:
         # Controla meses de cada ano civil (para cálculo do 13º)
         meses_por_ano: Dict[int, int] = {}
         
+        # ===== NOVO: LÓGICA DE SALÁRIO MÍNIMO DINÂMICO =====
+        rmi_base_original = rmi  # Guarda o valor original para referência
+        
         while data_atual <= data_fim:
             ano = data_atual.year
             mes = data_atual.month
             competencia_str = data_atual.strftime("%m/%Y")
+            
+            # DETERMINA O VALOR BASE DO MÊS
+            if usar_salario_minimo_dinamico:
+                # Busca o salário mínimo vigente neste mês específico
+                try:
+                    rmi_efetivo_mes = obter_salario_minimo(data_atual)
+                except ValueError as e:
+                    # Se não houver dados, usa o último valor conhecido
+                    warnings.warn(f"Erro ao buscar salário mínimo para {competencia_str}: {e}")
+                    rmi_efetivo_mes = rmi_base_original if rmi_base_original > 0 else 1412.0  # Fallback
+            else:
+                # Usa o valor fixo informado
+                rmi_efetivo_mes = rmi
+            
+            # Aplica adicional de 25% se for grande invalidez
+            if tem_adicional_25:
+                rmi_efetivo_mes *= 1.25
             
             # Conta meses do ano civil para 13º proporcional
             if ano not in meses_por_ano:
@@ -365,7 +400,7 @@ class GerenteFinanceiroBCB:
                 "numero": contador_mes,
                 "competencia": competencia_str,
                 "tipo": "RMI Mensal",
-                "valor_original": rmi_efetivo,
+                "valor_original": rmi_efetivo_mes,
                 "data_vencimento": data_atual,
                 "ano": ano,
                 "mes": mes
@@ -383,12 +418,25 @@ class GerenteFinanceiroBCB:
             mes_final_ano = 12 if ano < data_fim.year else data_fim.month
             
             if mes_final_ano >= 11:  # Novembro ou Dezembro
-                # Calcula 13º proporcional: (RMI / 12) × meses trabalhados no ano
-                valor_13 = (rmi_efetivo / 12) * qtd_meses
-                
-                # Adiciona na competência de dezembro (ou último mês disponível)
+                # Busca o salário base do mês de dezembro (ou último mês do ano)
                 mes_13 = min(12, mes_final_ano)
                 data_13 = date(ano, mes_13, 1)
+                
+                if usar_salario_minimo_dinamico:
+                    try:
+                        rmi_base_13 = obter_salario_minimo(data_13)
+                    except ValueError:
+                        rmi_base_13 = rmi_base_original if rmi_base_original > 0 else 1412.0
+                else:
+                    rmi_base_13 = rmi
+                
+                # Aplica adicional de 25% se aplicável
+                if tem_adicional_25:
+                    rmi_base_13 *= 1.25
+                
+                # Calcula 13º proporcional: (RMI_base / 12) × meses trabalhados no ano
+                valor_13 = (rmi_base_13 / 12) * qtd_meses
+                
                 competencia_13 = data_13.strftime("%m/%Y")
                 
                 competencias.append({
@@ -446,11 +494,24 @@ class GerenteFinanceiroBCB:
         # Observações
         observacoes = []
         
-        if tem_adicional_25:
+        if usar_salario_minimo_dinamico:
             observacoes.append(
-                f"Acréscimo de 25% aplicado (grande invalidez). "
-                f"RMI original: R$ {rmi:.2f} → RMI efetivo: R$ {rmi_efetivo:.2f}"
+                "SALÁRIO MÍNIMO DINÂMICO APLICADO: O valor da RMI foi atualizado mês a mês "
+                "conforme os reajustes oficiais do salário mínimo nacional, "
+                "respeitando a legislação vigente em cada competência."
             )
+            
+            if tem_adicional_25:
+                observacoes.append(
+                    "Acréscimo de 25% (grande invalidez) aplicado sobre o salário mínimo "
+                    "de cada mês, conforme Art. 45 da Lei 8.213/91."
+                )
+        else:
+            if tem_adicional_25:
+                observacoes.append(
+                    f"Acréscimo de 25% aplicado (grande invalidez). "
+                    f"RMI original: R$ {rmi:.2f} → RMI efetivo: R$ {rmi * 1.25:.2f}"
+                )
         
         observacoes.append(
             f"Índice de correção: {indice.upper()} (conforme determinação judicial)."
@@ -478,9 +539,10 @@ class GerenteFinanceiroBCB:
         # Monta resultado
         return {
             "status": "sucesso",
-            "rmi_base": round(rmi, 2),
-            "rmi_com_adicional": round(rmi_efetivo, 2),
+            "rmi_base": "SALARIO_MINIMO_DINAMICO" if usar_salario_minimo_dinamico else round(rmi, 2),
+            "rmi_com_adicional": "VARIVEL_POR_MES" if usar_salario_minimo_dinamico else round(rmi * 1.25 if tem_adicional_25 else rmi, 2),
             "tem_adicional_25": tem_adicional_25,
+            "usar_salario_minimo_dinamico": usar_salario_minimo_dinamico,
             "total_meses": len([p for p in memoria_mensal if p["tipo"] == "RMI Mensal"]),
             "total_devido_sem_correcao": round(total_sem_correcao, 2),
             "indice_aplicado": indice.upper(),

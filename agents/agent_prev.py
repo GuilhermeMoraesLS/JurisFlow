@@ -23,6 +23,7 @@ from dotenv import load_dotenv
 from tools.pdf_reader import LegalPDFReader
 from models.schemas_prev import DadosPrevidenciarios
 from core.financeiro_bcb import GerenteFinanceiroBCB
+from core.lookup_data import obter_salario_minimo, validar_rmi
 
 
 def carregar_prompt_sistema() -> str:
@@ -140,6 +141,77 @@ def limpar_json_da_resposta(resposta: str) -> str:
     return resposta.strip()
 
 
+def detectar_salario_minimo_dinamico(dados: DadosPrevidenciarios) -> bool:
+    """
+    Detecta se o benefício deve usar salário mínimo dinâmico.
+    
+    Esta função analisa os dados extraídos pela IA e determina se o benefício
+    acompanha os reajustes do salário mínimo ou tem valor fixo.
+    
+    Args:
+        dados: Dados previdenciários extraídos pela IA.
+        
+    Returns:
+        True se deve usar salário mínimo dinâmico, False caso contrário.
+        
+    Lógica de Detecção:
+        1. Se a RMI está ausente ou é zero → usa salário mínimo dinâmico
+        2. Se a RMI é aproximadamente igual ao salário mínimo vigente na DIB → usa dinâmico
+        3. Se nas observações houver menção a "salário mínimo" → usa dinâmico
+        4. Caso contrário → usa valor fixo
+    """
+    # 1. Se não tem RMI informada, assume salário mínimo
+    if not dados.rmi or dados.rmi <= 0:
+        return True
+    
+    # 2. Verifica se a RMI é aproximadamente igual ao salário mínimo na DIB
+    if dados.dib:
+        try:
+            salario_minimo_dib = obter_salario_minimo(dados.dib)
+            
+            # Tolerância de R$ 5,00 para considerar como salário mínimo
+            # (para casos de arredondamento ou valores próximos)
+            diferenca = abs(dados.rmi - salario_minimo_dib)
+            
+            if diferenca <= 5.0:
+                return True
+            
+            # Também verifica com o adicional de 25% aplicado
+            if dados.tem_adicional_25:
+                salario_com_adicional = salario_minimo_dib * 1.25
+                diferenca_com_adicional = abs(dados.rmi - salario_com_adicional)
+                
+                if diferenca_com_adicional <= 5.0:
+                    return True
+        
+        except ValueError:
+            # Se não conseguir buscar salário mínimo da DIB, continua análise
+            pass
+    
+    # 3. Verifica observações por palavras-chave
+    if dados.observacoes:
+        palavras_chave_sm = [
+            "salário mínimo",
+            "salario minimo",
+            "um salário mínimo",
+            "1 salário mínimo",
+            "benefício de piso",
+            "piso previdenciário",
+            "valor mínimo",
+            "sm vigente"
+        ]
+        
+        observacoes_lower = [obs.lower() for obs in dados.observacoes]
+        texto_observacoes = " ".join(observacoes_lower)
+        
+        for palavra_chave in palavras_chave_sm:
+            if palavra_chave in texto_observacoes:
+                return True
+    
+    # 4. Se passou por todos os testes, é um valor fixo
+    return False
+
+
 def formatar_relatorio_previdenciario(
     dados: DadosPrevidenciarios,
     resultado_calculo: dict
@@ -183,9 +255,15 @@ def formatar_relatorio_previdenciario(
     if dados.dip:
         linhas.append(f"DIP (Data de Inicio do Pagamento): {dados.dip.strftime('%d/%m/%Y')}")
     
-    if dados.rmi:
+    # RMI (com campo especial para salário mínimo dinâmico)
+    if resultado_calculo.get('usar_salario_minimo_dinamico'):
+        linhas.append("RMI (Renda Mensal Inicial): SALARIO MINIMO NACIONAL (atualizado mensalmente)")
+        
+        if dados.tem_adicional_25:
+            linhas.append("  + Adicional de 25% (Grande Invalidez) aplicado sobre cada competencia")
+    elif dados.rmi:
         valor_rmi = f"R$ {dados.rmi:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
-        linhas.append(f"RMI (Renda Mensal Inicial): {valor_rmi}")
+        linhas.append(f"RMI (Renda Mensal Inicial): {valor_rmi} (Valor Fixo)")
         
         if dados.tem_adicional_25:
             rmi_com_adicional = dados.rmi * 1.25
@@ -218,12 +296,20 @@ def formatar_relatorio_previdenciario(
         linhas.append(f"  Total de Meses em Atraso: {resultado_calculo['total_meses']}")
         linhas.append("")
         
-        valor_base = f"R$ {resultado_calculo['rmi_base']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
-        linhas.append(f"RMI Base: {valor_base}")
+        # Base de cálculo
+        if resultado_calculo.get('usar_salario_minimo_dinamico'):
+            linhas.append("BASE DE CALCULO: Salario Minimo Nacional (atualizado mensalmente)")
+            linhas.append("  O valor foi ajustado conforme os reajustes oficiais em cada competencia.")
+        else:
+            valor_base = f"R$ {resultado_calculo['rmi_base']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+            linhas.append(f"RMI Base (Valor Fixo): {valor_base}")
         
         if resultado_calculo['tem_adicional_25']:
-            valor_adicional = f"R$ {resultado_calculo['rmi_com_adicional']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
-            linhas.append(f"RMI com Adicional de 25%: {valor_adicional}")
+            if resultado_calculo.get('usar_salario_minimo_dinamico'):
+                linhas.append("  + Adicional de 25% (Grande Invalidez) sobre cada competencia")
+            else:
+                valor_adicional = f"R$ {resultado_calculo['rmi_com_adicional']:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.')
+                linhas.append(f"RMI com Adicional de 25%: {valor_adicional}")
         
         linhas.append("")
         
@@ -373,7 +459,7 @@ def processar_acao_previdenciaria(
     
     resposta_texto = response.content
     
-    # Parse da resposta (igual ao agent.py trabalhista)
+    # Parse da resposta
     try:
         json_limpo = limpar_json_da_resposta(resposta_texto)
         dados_dict = json.loads(json_limpo)
@@ -396,11 +482,34 @@ def processar_acao_previdenciaria(
         print("\nCriando objeto vazio para demonstração...")
         dados_extraidos = DadosPrevidenciarios()
     
-    # 2. CÁLCULO DE ATRASADOS (só se tiver RMI e DIB)
+    # ===== NOVA LÓGICA: DETECÇÃO DE SALÁRIO MÍNIMO DINÂMICO =====
+    usar_sm_dinamico = False
+    
+    if dados_extraidos.dib:  # Só detecta se tiver DIB
+        usar_sm_dinamico = detectar_salario_minimo_dinamico(dados_extraidos)
+        
+        if usar_sm_dinamico:
+            print("\n🔍 DETECÇÃO AUTOMÁTICA:")
+            print("  ✓ Benefício identificado como SALÁRIO MÍNIMO DINÂMICO")
+            print("  → Os reajustes legais do salário mínimo serão aplicados automaticamente")
+            print("    em cada competencia (conforme Lei vigente).")
+        else:
+            print("\n🔍 DETECÇÃO AUTOMÁTICA:")
+            print("  ✓ Benefício identificado como VALOR FIXO")
+            if dados_extraidos.rmi:
+                print(f"  → Será usado o valor de R$ {dados_extraidos.rmi:.2f} para todas as competências.")
+    
+    # 2. CÁLCULO DE ATRASADOS
     resultado_calculo = {}
     texto_formatado = None
     
-    if dados_extraidos.rmi and dados_extraidos.rmi > 0 and dados_extraidos.dib:
+    # Valida se tem os dados mínimos para calcular
+    pode_calcular = dados_extraidos.dib is not None
+    
+    if not usar_sm_dinamico:
+        pode_calcular = pode_calcular and dados_extraidos.rmi and dados_extraidos.rmi > 0
+    
+    if pode_calcular:
         print("\n" + "=" * 80)
         print("FASE 2: Cálculo de Atrasados com Correção Monetária (BCB)")
         print("-" * 80)
@@ -408,14 +517,23 @@ def processar_acao_previdenciaria(
         # Define data final (hoje ou DIP, se fornecida)
         data_fim = dados_extraidos.dip if dados_extraidos.dip else date.today()
         
+        # Validação da RMI (se não for salário mínimo dinâmico)
+        if not usar_sm_dinamico and dados_extraidos.rmi:
+            valido, mensagem = validar_rmi(dados_extraidos.rmi, dados_extraidos.dib)
+            if not valido:
+                print(f"\n⚠ AVISO DE VALIDAÇÃO: {mensagem}")
+                print("  O cálculo prosseguirá, mas revise o valor informado.")
+        
         gerente_bcb = GerenteFinanceiroBCB()
         
+        # ===== CHAMA O CÁLCULO COM O FLAG CORRETO =====
         resultado_calculo = gerente_bcb.calcular_atrasados(
-            rmi=dados_extraidos.rmi,
+            rmi=dados_extraidos.rmi if not usar_sm_dinamico else 0.0,  # Passa 0 se for dinâmico
             data_inicio=dados_extraidos.dib,
             data_fim=data_fim,
             indice=dados_extraidos.indice_correcao,
-            tem_adicional_25=dados_extraidos.tem_adicional_25
+            tem_adicional_25=dados_extraidos.tem_adicional_25,
+            usar_salario_minimo_dinamico=usar_sm_dinamico  # ← NOVO PARÂMETRO
         )
         
         if resultado_calculo["status"] == "sucesso":
@@ -423,6 +541,12 @@ def processar_acao_previdenciaria(
             print(f"  - Período: {dados_extraidos.dib} até {data_fim}")
             print(f"  - Total de meses: {resultado_calculo['total_meses']}")
             print(f"  - Índice aplicado: {resultado_calculo['indice_aplicado']}")
+            
+            if usar_sm_dinamico:
+                print(f"  - Modo: SALÁRIO MÍNIMO DINÂMICO (atualizado mensalmente)")
+            else:
+                print(f"  - Modo: VALOR FIXO (R$ {dados_extraidos.rmi:.2f})")
+            
             print(f"  - Total corrigido: R$ {resultado_calculo['total_corrigido']:,.2f}")
             
             # 3. FORMATAÇÃO PARA WORD (só se cálculo teve sucesso)
@@ -442,21 +566,23 @@ def processar_acao_previdenciaria(
     
     else:
         print("\n⚠ AVISO: Cálculo de atrasados não executado.")
-        if not dados_extraidos.rmi or dados_extraidos.rmi <= 0:
-            print("  - RMI não informada ou inválida.")
-            print("  - Forneça a RMI no 'Contexto Adicional' (ex: 'RMI de R$ 1.500,00')")
         if not dados_extraidos.dib:
             print("  - DIB não encontrada no documento.")
+        if not usar_sm_dinamico and (not dados_extraidos.rmi or dados_extraidos.rmi <= 0):
+            print("  - RMI não informada ou inválida.")
+            print("  - Forneça a RMI no 'Contexto Adicional' (ex: 'RMI de R$ 1.500,00')")
+            print("  - Ou informe que é um benefício de salário mínimo.")
         
         resultado_calculo = {
             "status": "nao_executado",
-            "erro": "RMI ou DIB ausentes. Cálculo não realizado."
+            "erro": "Dados insuficientes para realizar o cálculo. Verifique DIB e RMI."
         }
     
     return {
         "dados_extraidos": dados_extraidos.model_dump(),
         "calculo": resultado_calculo,
-        "relatorio_word": texto_formatado
+        "relatorio_word": texto_formatado,
+        "usar_salario_minimo_dinamico": usar_sm_dinamico
     }
 
 
@@ -477,7 +603,9 @@ def main():
     
     # Simula notas do advogado (contexto adicional)
     notas_usuario = """
-    Cliente sempre recebeu um salário mínimo por mês durante todos os meses de contribuição. 25% de adicional por grande invalidez.
+    Cliente sempre recebeu um salário mínimo por mês durante todos os meses de contribuição.
+    Benefício concedido com adicional de 25% por grande invalidez.
+    DIB: 01/01/2022
     """
     
     try:
@@ -492,6 +620,12 @@ def main():
         if resultado['calculo'].get('status') == 'sucesso':
             total = resultado['calculo']['total_corrigido']
             print(f"\n💰 VALOR TOTAL DOS ATRASADOS: R$ {total:,.2f}".replace(',', '_').replace('.', ',').replace('_', '.'))
+            
+            if resultado.get('usar_salario_minimo_dinamico'):
+                print("\n📊 MÉTODO APLICADO: Salário Mínimo Dinâmico")
+                print("   Os valores foram atualizados conforme os reajustes legais em cada mês.")
+            else:
+                print("\n📊 MÉTODO APLICADO: Valor Fixo de RMI")
         
     except FileNotFoundError as e:
         print(f"\n❌ {e}")
