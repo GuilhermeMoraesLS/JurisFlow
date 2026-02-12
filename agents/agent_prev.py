@@ -603,9 +603,8 @@ def main():
     
     # Simula notas do advogado (contexto adicional)
     notas_usuario = """
-    Cliente sempre recebeu um salário mínimo por mês durante todos os meses de contribuição.
+    Cliente sempre recebeu um salário mínimo de forma dinâmica durante todo o período de contribuição.
     Benefício concedido com adicional de 25% por grande invalidez.
-    DIB: 01/01/2022
     """
     
     try:
