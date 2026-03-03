@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from tools.pdf_reader import LegalPDFReader
 from models.schemas import DadosTrabalhistasExtraidos
 from core.calculo_trabalhista import calcular_rescisao
+from core.human_in_the_loop import validar_dados_obrigatorios  # ← NOVO IMPORT
 
 
 def carregar_prompt_sistema() -> str:
@@ -327,16 +328,7 @@ def formatar_para_word(dados_extraidos: DadosTrabalhistasExtraidos, resultado_ca
 
 def processar_reclamacao(caminho_pdf: str) -> dict:
     """
-    Pipeline completo: Extração (IA) → Cálculo (Lógica Pura).
-
-    Args:
-        caminho_pdf: Caminho para o arquivo PDF da reclamação trabalhista.
-
-    Returns:
-        Dicionário com resultados da extração e do cálculo.
-
-    Raises:
-        FileNotFoundError: Se o PDF não existir.
+    Pipeline completo: Extração (IA) → Validação (Human-in-the-Loop) → Cálculo (Lógica Pura).
     """
     # Validação do arquivo
     pdf_path = Path(caminho_pdf)
@@ -353,43 +345,77 @@ def processar_reclamacao(caminho_pdf: str) -> dict:
     print("\nFASE 1: Extracao de Dados (GPT-4o-mini)")
     print("-" * 80)
     
-    agent = inicializar_agente()
-    
-    response = agent.run(
-        f"Extraia os dados trabalhistas do arquivo: {caminho_pdf}\n\n"
-        f"Retorne APENAS o JSON no formato especificado, sem texto adicional.",
-        stream=False
-    )
-    
-    resposta_texto = response.content
-    
-    # Parse da resposta
     try:
-        json_limpo = limpar_json_da_resposta(resposta_texto)
-        dados_dict = json.loads(json_limpo)
-        dados_extraidos = DadosTrabalhistasExtraidos(**dados_dict)
+        agent = inicializar_agente()
         
-        print("JSON validado com sucesso!")
+        response = agent.run(
+            f"Extraia os dados trabalhistas do arquivo: {caminho_pdf}\n\n"
+            f"Retorne APENAS o JSON no formato especificado, sem texto adicional.",
+            stream=False
+        )
         
-    except json.JSONDecodeError as e:
-        print(f"Erro ao parsear JSON: {e}")
-        print(f"\nJSON extraido:\n{json_limpo[:300]}...")
-        print("\nCriando objeto vazio para demonstracao...")
-        dados_extraidos = DadosTrabalhistasExtraidos()
-        
-    except Exception as e:
-        print(f"Erro na validacao Pydantic: {e}")
-        print("\nCriando objeto vazio para demonstracao...")
-        dados_extraidos = DadosTrabalhistasExtraidos()
+        if not response or not response.content:
+            print("ERRO: Resposta vazia da API")
+            dados_extraidos = DadosTrabalhistasExtraidos()
+        else:
+            resposta_texto = response.content
+            # Parse da resposta
+            try:
+                # Debug: Mostra a resposta bruta
+                print(f"\n[DEBUG] Resposta bruta (primeiros 500 chars):")
+                print(resposta_texto[:500])
+                print("...")
+                
+                json_limpo = limpar_json_da_resposta(resposta_texto)
+                
+                # Debug: Mostra o JSON limpo
+                print(f"\n[DEBUG] JSON limpo:")
+                print(json_limpo[:300])
+                print("...")
+                
+                dados_dict = json.loads(json_limpo)
+                dados_extraidos = DadosTrabalhistasExtraidos(**dados_dict)
+                
+                print("JSON validado com sucesso!")
+                
+            except json.JSONDecodeError as e:
+                print(f"Erro ao parsear JSON: {e}")
+                print(f"\nJSON tentado (completo):\n{json_limpo}")
+                print("\nCriando objeto vazio para demonstracao...")
+                dados_extraidos = DadosTrabalhistasExtraidos()
+            
+            except Exception as e:
+                print(f"Erro na validacao Pydantic: {e}")
+                print("\nCriando objeto vazio para demonstracao...")
+                dados_extraidos = DadosTrabalhistasExtraidos()
     
-    # 2. CÁLCULO DETERMINÍSTICO
+    except KeyboardInterrupt:
+        print("\nOperacao cancelada pelo usuario.")
+        return {"erro": "Cancelado pelo usuario"}
+    
+    except Exception as e:
+        print(f"\nErro ao chamar o agente: {type(e).__name__} - {str(e)}")
+        dados_extraidos = DadosTrabalhistasExtraidos()
+
+    # 2. HUMAN-IN-THE-LOOP (NOVO - entre Fase 1 e Fase 2)
+    print("\n" + "=" * 80)
+    print("FASE 1.5: Validação e Correção de Dados (Human-in-the-Loop)")
+    print("-" * 80)
+
+    dados_dict = dados_extraidos.model_dump()
+    dados_dict_validado = validar_dados_obrigatorios(dados_dict)
+
+    # Reconstrói o objeto Pydantic com os dados corrigidos
+    dados_extraidos = DadosTrabalhistasExtraidos(**dados_dict_validado)
+
+    # 3. CÁLCULO DETERMINÍSTICO (era Fase 2, renumerado para clareza)
     print("\n" + "=" * 80)
     print("FASE 2: Calculo de Verbas Rescissorias (Core)")
     print("-" * 80)
     
     resultado_calculo = calcular_rescisao(dados_extraidos)
-    
-    # 3. FORMATAÇÃO PARA WORD
+
+    # 4. FORMATAÇÃO PARA WORD
     print("\n" + "=" * 80)
     print("RELATORIO FORMATADO PARA WORD")
     print("=" * 80)
